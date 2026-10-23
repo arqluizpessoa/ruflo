@@ -1,0 +1,54 @@
+name: Security baseline - tracked credentials
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  tracked-credentials:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout (read-only and pinned)
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+      - name: Reject tracked private keys and sensitive environment variables
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          import os, re, subprocess, sys
+          from pathlib import Path
+          
+          paths = [os.fsdecode(p) for p in subprocess.check_output(['git', 'ls-files', '-z']).split(b'\0') if p]
+          protected_key = re.compile(r'(^|_)(SERVICE_ROLE|SECRET|PRIVATE_KEY|PASSWORD|PASSWD|ACCESS_TOKEN|REFRESH_TOKEN|API_TOKEN|JWT_SECRET|DATABASE_URL|SMTP_PASSWORD|IMAP_PASSWORD|OPENAI_API_KEY|ANTHROPIC_API_KEY|STRIPE_SECRET_KEY)($|_)', re.I)
+          assign = re.compile(r'^\s*(?:export\s+)?([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(.*?)\s*$')
+          dangerous_file = re.compile(r'(^|/)(id_rsa|id_ed25519)(\.pub)?$|\.(p12|pfx|pem)$|(^|/)service[-_]?account[^/]*\.json$', re.I)
+          placeholder = re.compile(r'^(?:[\"\x27]?)(?:YOUR_|REPLACE|EXAMPLE|DUMMY|CHANGEME|TODO|XXX|<|\$\{)', re.I)
+          problems = []
+          for name in paths:
+              path = Path(name)
+              if dangerous_file.search(name) and not name.endswith('.pub'):
+                  problems.append(f'{name}: material de chave privada/certificado versionado')
+              is_env = path.name == '.env' or path.name.startswith('.env.')
+              if not is_env or path.name.endswith(('.example', '.sample', '.template')) or not path.is_file():
+                  continue
+              for lineno, line in enumerate(path.read_text(encoding='utf-8', errors='replace').splitlines(), 1):
+                  match = assign.match(line)
+                  if not match:
+                      continue
+                  key, val = match.group(1), match.group(2).strip().strip('\"\x27')
+                  if protected_key.search(key) and val and not placeholder.match(val):
+                      problems.append(f'{name}:{lineno}: configuracao sensivel {key} em arquivo versionado')
+          if problems:
+              print('SECURITY BASELINE: itens para remocao e rotacao (sem revelar valores):')
+              for issue in problems:
+                  print(' - ' + issue)
+              sys.exit(1)
+          print(f'Security baseline: {len(paths)} arquivos rastreados inspecionados; nenhum segredo de alta confianca em .env detectado.')
+          PY
